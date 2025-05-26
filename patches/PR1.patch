@@ -1,0 +1,166 @@
+diff --git i/CMakeLists.txt w/CMakeLists.txt
+index 590fdfe..96e552b 100644
+--- i/CMakeLists.txt
++++ w/CMakeLists.txt
+@@ -8,7 +8,7 @@ else()
+ endif()
+ set(CMAKE_PROJECT_DESCRIPTION "a fast C/C++ compiler cache")
+ 
+-set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED YES)
+ set(CMAKE_CXX_EXTENSIONS NO)
+ 
+diff --git i/cmake/config.h.in w/cmake/config.h.in
+index f7228d5..1d942fa 100644
+--- i/cmake/config.h.in
++++ w/cmake/config.h.in
+@@ -44,13 +44,13 @@
+ #elif defined(__ibmxl__) && defined(__clang__) // Compiler xlclang
+ #  define _XOPEN_SOURCE 600
+ #  define _ALL_SOURCE 1
+-#elif !defined(__SunOS_5_11) && !defined(__APPLE__)
++#elif !defined(__SunOS_5_11) && !defined(__APPLE__) && !defined(__MVS__)
+ #  define _XOPEN_SOURCE
+ #endif
+ 
+ #if defined(__SunOS_5_10) || defined(__SunOS_5_11)
+ #  define __EXTENSIONS__ 1
+-#else
++#elif !defined(__MVS__)
+ #  define _XOPEN_SOURCE_EXTENDED
+ #endif
+ 
+diff --git i/src/ccache/execute.cpp w/src/ccache/execute.cpp
+index 7b1b7d2..9c642d4 100644
+--- i/src/ccache/execute.cpp
++++ w/src/ccache/execute.cpp
+@@ -324,14 +324,18 @@ execute(Context& ctx,
+ 
+   sigset_t sigmask;
+   CHECK_LIB_CALL(sigemptyset, &sigmask);
++#ifndef __MVS__
+   CHECK_LIB_CALL(posix_spawnattr_setsigmask, &attr, &sigmask);
++#endif
+ 
+   sigset_t sigdefault;
+   CHECK_LIB_CALL(sigemptyset, &sigdefault);
+   for (int signum : SignalHandler::get_handled_signals()) {
+     CHECK_LIB_CALL(sigaddset, &sigdefault, signum);
+   }
++#ifndef __MVS__
+   CHECK_LIB_CALL(posix_spawnattr_setsigdefault, &attr, &sigdefault);
++#endif
+ 
+   int result;
+   {
+diff --git i/src/ccache/storage/storage.cpp w/src/ccache/storage/storage.cpp
+index 702d712..2650f57 100644
+--- i/src/ccache/storage/storage.cpp
++++ w/src/ccache/storage/storage.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include "storage.hpp"
+ 
++#include <algorithm>
++
+ #include <ccache/config.hpp>
+ #include <ccache/core/cacheentry.hpp>
+ #include <ccache/core/exceptions.hpp>
+diff --git i/src/ccache/util/file.cpp w/src/ccache/util/file.cpp
+index 183d04b..69419e6 100644
+--- i/src/ccache/util/file.cpp
++++ w/src/ccache/util/file.cpp
+@@ -225,7 +225,7 @@ create_cachedir_tag(const fs::path& dir)
+ tl::expected<void, std::string>
+ fallocate(int fd, size_t new_size)
+ {
+-#ifdef HAVE_POSIX_FALLOCATE
++#if defined(HAVE_POSIX_FALLOCATE) && !defined(__MVS__)
+   const int posix_fallocate_err = posix_fallocate(fd, 0, new_size);
+   if (posix_fallocate_err == 0) {
+     return {};
+diff --git i/src/ccache/util/filesystem.hpp w/src/ccache/util/filesystem.hpp
+index c009b08..542cea6 100644
+--- i/src/ccache/util/filesystem.hpp
++++ w/src/ccache/util/filesystem.hpp
+@@ -24,6 +24,50 @@
+ #include <filesystem>
+ #include <system_error>
+ 
++#include <dirent.h>
++#include <unistd.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <cerrno>
++#include <stdexcept>
++
++inline std::uintmax_t portable_remove_all(const std::string& path) {
++	std::uintmax_t count = 0;
++	struct stat path_stat{};
++
++	if (lstat(path.c_str(), &path_stat) != 0) {
++		if (errno == ENOENT) return 0;
++		throw std::runtime_error("lstat failed: " + path + ": " + std::strerror(errno));
++	}
++
++	if (S_ISDIR(path_stat.st_mode)) {
++		DIR* dir = opendir(path.c_str());
++		if (!dir) throw std::runtime_error("opendir failed: " + path + ": " + std::strerror(errno));
++
++		struct dirent* entry;
++		while ((entry = readdir(dir)) != nullptr) {
++			std::string name = entry->d_name;
++			if (name == "." || name == "..") continue;
++			count += portable_remove_all(path + "/" + name);
++		}
++		closedir(dir);
++		if (rmdir(path.c_str()) != 0) {
++			throw std::runtime_error("rmdir failed: " + path + ": " + std::strerror(errno));
++		}
++		count++;
++	} else {
++		if (unlink(path.c_str()) != 0) {
++			throw std::runtime_error("unlink failed: " + path + ": " + std::strerror(errno));
++		}
++		count++;
++	}
++
++	return count;
++}
++
+ namespace util::filesystem {
+ 
+ using directory_iterator = std::filesystem::directory_iterator;
+@@ -113,7 +157,15 @@ DEF_WRAP_1_P(is_directory,        bool,           const path&, p)
+ DEF_WRAP_1_P(is_regular_file,     bool,           const path&, p)
+ DEF_WRAP_1_R(read_symlink,        path,           const path&, p)
+ DEF_WRAP_1_R(remove,              bool,           const path&, p)
+-DEF_WRAP_1_R(remove_all,          std::uintmax_t, const path&, p)
++inline std::uintmax_t remove_all(const path& p, std::error_code& ec) {
++	try {
++		ec.clear();
++		return portable_remove_all(p.string());
++	} catch (const std::exception& e) {
++		ec = std::make_error_code(std::errc::operation_not_permitted);
++		return static_cast<std::uintmax_t>(-1);
++	}
++}
+ DEF_WRAP_0_R(temp_directory_path, path)
+ DEF_WRAP_1_R(weakly_canonical,    path,           const path&, p)
+ 
+diff --git i/src/ccache/util/path.hpp w/src/ccache/util/path.hpp
+index 8e566ac..3b8a893 100644
+--- i/src/ccache/util/path.hpp
++++ w/src/ccache/util/path.hpp
+@@ -20,6 +20,7 @@
+ 
+ #include <ccache/util/pathstring.hpp>
+ 
++#include <algorithm>
+ #include <filesystem>
+ #include <string>
+ #include <string_view>

@@ -1,6 +1,6 @@
 # Update bump details accordingly. Use bump check to confirm.
 # bump: ccache-version /CCACHE_VERSION="(.*)"/ https://github.com/ccache/ccache.git|semver:*
-# CCACHE_VERSION="V.R.M" # Specify a stable release
+# CCACHE_VERSION="4.11.3" # Specify a stable release
 # export ZOPEN_STABLE_TAG="v${CCACHE_VERSION}"
 
 ###

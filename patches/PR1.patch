@@ -12,7 +12,7 @@ index 590fdfe..96e552b 100644
  set(CMAKE_CXX_EXTENSIONS NO)
  
 diff --git i/cmake/config.h.in w/cmake/config.h.in
-index f7228d5..1d942fa 100644
+index f39a18f..6a1a466 100644
 --- i/cmake/config.h.in
 +++ w/cmake/config.h.in
 @@ -44,13 +44,13 @@
@@ -31,8 +31,38 @@ index f7228d5..1d942fa 100644
  #  define _XOPEN_SOURCE_EXTENDED
  #endif
  
+diff --git i/src/ccache/core/resultretriever.cpp w/src/ccache/core/resultretriever.cpp
+index 5212016..d7b1880 100644
+--- i/src/ccache/core/resultretriever.cpp
++++ w/src/ccache/core/resultretriever.cpp
+@@ -34,6 +34,8 @@
+ #include <ccache/util/string.hpp>
+ #include <ccache/util/wincompat.hpp>
+ 
++#include <zos.h>
++
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -221,7 +223,7 @@ ResultRetriever::write_dependency_file(const fs::path& path,
+   ASSERT(m_ctx.args_info.dependency_target);
+ 
+   util::Fd fd(open(
+-    util::pstr(path).c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666));
++    util::pstr(path).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666));
+   if (!fd) {
+     throw WriteError(FMT("Failed to open {} for writing", path));
+   }
+@@ -230,6 +232,7 @@ ResultRetriever::write_dependency_file(const fs::path& path,
+     util::throw_on_error<WriteError>(util::write_fd(*fd, d, s),
+                                      FMT("Failed to write to {}: ", path));
+   };
++  __disableautocvt(*fd);
+ 
+   std::string_view str_data = util::to_string_view(data);
+   size_t start_pos = 0;
 diff --git i/src/ccache/execute.cpp w/src/ccache/execute.cpp
-index 7b1b7d2..9c642d4 100644
+index f3e1ad7..a600e43 100644
 --- i/src/ccache/execute.cpp
 +++ w/src/ccache/execute.cpp
 @@ -324,14 +324,18 @@ execute(Context& ctx,
@@ -55,7 +85,7 @@ index 7b1b7d2..9c642d4 100644
    int result;
    {
 diff --git i/src/ccache/storage/storage.cpp w/src/ccache/storage/storage.cpp
-index 702d712..2650f57 100644
+index 63e0338..682cb1c 100644
 --- i/src/ccache/storage/storage.cpp
 +++ w/src/ccache/storage/storage.cpp
 @@ -18,6 +18,8 @@
@@ -68,10 +98,27 @@ index 702d712..2650f57 100644
  #include <ccache/core/cacheentry.hpp>
  #include <ccache/core/exceptions.hpp>
 diff --git i/src/ccache/util/file.cpp w/src/ccache/util/file.cpp
-index 183d04b..69419e6 100644
+index 183d04b..7d09d2a 100644
 --- i/src/ccache/util/file.cpp
 +++ w/src/ccache/util/file.cpp
-@@ -225,7 +225,7 @@ create_cachedir_tag(const fs::path& dir)
+@@ -32,6 +32,8 @@
+ #include <ccache/util/pathstring.hpp>
+ #include <ccache/util/temporaryfile.hpp>
+ 
++#include <zos.h>
++
+ #ifdef __APPLE__
+ #  include <copyfile.h>
+ #endif
+@@ -175,6 +177,7 @@ copy_file_impl(const fs::path& src,
+   }
+ #  else
+   copy_fd(*src_fd, *dst_fd);
++  __setfdbinary(*dst_fd);
+ #  endif
+   return {};
+ }
+@@ -225,7 +228,7 @@ create_cachedir_tag(const fs::path& dir)
  tl::expected<void, std::string>
  fallocate(int fd, size_t new_size)
  {
@@ -80,6 +127,28 @@ index 183d04b..69419e6 100644
    const int posix_fallocate_err = posix_fallocate(fd, 0, new_size);
    if (posix_fallocate_err == 0) {
      return {};
+@@ -683,7 +686,9 @@ write_file(const fs::path& path, std::string_view data, WriteFileMode mode)
+   if (!fd) {
+     return tl::unexpected(strerror(errno));
+   }
+-  return write_fd(*fd, data.data(), data.size());
++  auto red = write_fd(*fd, data.data(), data.size());
++  __setfdbinary(*fd);
++  return red;
+ }
+ 
+ tl::expected<void, std::string>
+@@ -703,7 +708,9 @@ write_file(const fs::path& path,
+   if (!fd) {
+     return tl::unexpected(strerror(errno));
+   }
+-  return write_fd(*fd, data.data(), data.size());
++  auto red  = write_fd(*fd, data.data(), data.size());
++  __setfdbinary(*fd);
++  return red;
+ }
+ 
+ } // namespace util
 diff --git i/src/ccache/util/filesystem.hpp w/src/ccache/util/filesystem.hpp
 index c009b08..542cea6 100644
 --- i/src/ccache/util/filesystem.hpp
